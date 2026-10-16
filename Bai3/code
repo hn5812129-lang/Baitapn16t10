@@ -1,0 +1,527 @@
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Drawing;
+using System.IO;
+using System.Linq;
+using System.Text.RegularExpressions;
+using System.Windows.Forms;
+
+namespace RepairServiceTracker
+{
+    // Lớp dữ liệu Đơn đăng ký sửa chữa
+    public class RepairOrder
+    {
+        public string OrderId { get; set; }         // Mã đơn (Duy nhất)
+        public string CustomerName { get; set; }    // Tên khách hàng
+        public string Phone { get; set; }           // Số điện thoại
+        public string EquipmentType { get; set; }   // Loại thiết bị
+        public string ErrorDescription { get; set; }// Mô tả lỗi
+        public DateTime ReceiveDate { get; set; }   // Ngày tiếp nhận
+        public decimal EstimatedCost { get; set; }  // Chi phí dự kiến
+        public string Status { get; set; }          // Trạng thái (Mới tiếp nhận, Đang sửa, Chờ linh kiện, Hoàn tất, Đã hủy)
+        public string ImagePath { get; set; }       // Đường dẫn ảnh thiết bị
+    }
+
+    public partial class MainForm : Form
+    {
+        private List<RepairOrder> masterList = new List<RepairOrder>();
+        private BindingList<RepairOrder> displayList;
+        private BindingSource bindingSource = new BindingSource();
+
+        // Các Controls trên giao diện
+        private TableLayoutPanel mainLayout;
+        private GroupBox grpInputs, grpControls;
+        private TextBox txtOrderId, txtCustomerName, txtPhone, txtErrorDescription, txtSearch;
+        private NumericUpDown numEstimatedCost;
+        private ComboBox cmbEquipmentType, cmbStatus, cmbFilterStatus;
+        private DateTimePicker dtpReceiveDate;
+        private PictureBox picEquipment;
+        private Button btnBrowseImage, btnAdd, btnUpdate, btnDelete, btnClear, btnResetFilter;
+        private DataGridView dgvOrders;
+        private StatusStrip statusStrip;
+        private ToolStripStatusLabel lblCountInfo, lblTotalCostInfo;
+        private ErrorProvider errorProvider;
+        private MenuStrip menuStrip;
+
+        private string currentImagePath = string.Empty;
+
+        public MainForm()
+        {
+            InitializeComponentCustom();
+            LoadInitialData();
+        }
+
+        private void InitializeComponentCustom()
+        {
+            this.Text = "Repair Service Tracker - Quản lý đơn đăng ký dịch vụ sửa chữa";
+            this.Size = new System.Drawing.Size(1100, 780);
+            this.StartPosition = FormStartPosition.CenterScreen;
+
+            errorProvider = new ErrorProvider();
+
+            // 1. MenuStrip (Xuất CSV & Thoát)
+            menuStrip = new MenuStrip();
+            ToolStripMenuItem menuFile = new ToolStripMenuItem("Tệp");
+            ToolStripMenuItem menuExport = new ToolStripMenuItem("Xuất danh sách đang hiển thị ra CSV...");
+            ToolStripMenuItem menuExit = new ToolStripMenuItem("Thoát");
+
+            menuExport.Click += MenuExport_Click;
+            menuExit.Click += (s, e) => this.Close();
+
+            menuFile.DropDownItems.AddRange(new ToolStripItem[] { menuExport, new ToolStripSeparator(), menuExit });
+            menuStrip.Items.Add(menuFile);
+            this.MainMenuStrip = menuStrip;
+            this.Controls.Add(menuStrip);
+
+            // 2. StatusStrip (Hiển thị số lượng đơn và tổng chi phí đơn chưa hoàn tất)
+            statusStrip = new StatusStrip();
+            lblCountInfo = new ToolStripStatusLabel("Số đơn hiển thị: 0  |  ");
+            lblTotalCostInfo = new ToolStripStatusLabel("Tổng chi phí dự kiến (chưa hoàn tất): 0 ₫");
+            statusStrip.Items.AddRange(new ToolStripItem[] { lblCountInfo, lblTotalCostInfo });
+            this.Controls.Add(statusStrip);
+
+            // 3. Main TableLayoutPanel
+            mainLayout = new TableLayoutPanel();
+            mainLayout.Dock = DockStyle.Fill;
+            mainLayout.ColumnCount = 1;
+            mainLayout.RowCount = 3;
+            mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 260f)); // Vùng nhập liệu & Ảnh
+            mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 65f));  // Vùng tìm kiếm & lọc
+            mainLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f)); // DataGridView
+            this.Controls.Add(mainLayout);
+            mainLayout.BringToFront();
+
+            // --- VÙNG 1: NHẬP LIỆU & ẢNH ---
+            grpInputs = new GroupBox { Text = "Thông tin chi tiết đơn sửa chữa", Dock = DockStyle.Fill };
+            TableLayoutPanel inputAndPicLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1 };
+            inputAndPicLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 75f)); // Form nhập liệu
+            inputAndPicLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25f)); // Khu vực ảnh
+
+            // Bảng nhập liệu chi tiết (4 cột)
+            TableLayoutPanel formPanel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 4, RowCount = 4, Padding = new Padding(3) };
+
+            formPanel.Controls.Add(new Label { Text = "Mã đơn:", Anchor = AnchorStyles.Left }, 0, 0);
+            txtOrderId = new TextBox { Dock = DockStyle.Fill };
+            formPanel.Controls.Add(txtOrderId, 1, 0);
+
+            formPanel.Controls.Add(new Label { Text = "Tên khách hàng:", Anchor = AnchorStyles.Left }, 2, 0);
+            txtCustomerName = new TextBox { Dock = DockStyle.Fill };
+            formPanel.Controls.Add(txtCustomerName, 3, 0);
+
+            formPanel.Controls.Add(new Label { Text = "Số điện thoại:", Anchor = AnchorStyles.Left }, 0, 1);
+            txtPhone = new TextBox { Dock = DockStyle.Fill };
+            formPanel.Controls.Add(txtPhone, 1, 1);
+
+            formPanel.Controls.Add(new Label { Text = "Loại thiết bị:", Anchor = AnchorStyles.Left }, 2, 1);
+            cmbEquipmentType = new ComboBox { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList };
+            cmbEquipmentType.Items.AddRange(new string[] { "Laptop", "Điện thoại di động", "Máy tính bảng", "Máy in", "Tivi / Màn hình", "Thiết bị khác" });
+            formPanel.Controls.Add(cmbEquipmentType, 3, 1);
+
+            formPanel.Controls.Add(new Label { Text = "Ngày tiếp nhận:", Anchor = AnchorStyles.Left }, 0, 2);
+            dtpReceiveDate = new DateTimePicker { Format = DateTimePickerFormat.Short, Dock = DockStyle.Fill };
+            formPanel.Controls.Add(dtpReceiveDate, 1, 2);
+
+            formPanel.Controls.Add(new Label { Text = "Chi phí dự kiến:", Anchor = AnchorStyles.Left }, 2, 2);
+            numEstimatedCost = new NumericUpDown { Maximum = 1000000000, Increment = 100000, Dock = DockStyle.Fill };
+            formPanel.Controls.Add(numEstimatedCost, 3, 2);
+
+            formPanel.Controls.Add(new Label { Text = "Trạng thái:", Anchor = AnchorStyles.Left }, 0, 3);
+            cmbStatus = new ComboBox { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList };
+            cmbStatus.Items.AddRange(new string[] { "Mới tiếp nhận", "Đang sửa", "Chờ linh kiện", "Hoàn tất", "Đã hủy" });
+            formPanel.Controls.Add(cmbStatus, 1, 3);
+
+            formPanel.Controls.Add(new Label { Text = "Mô tả lỗi:", Anchor = AnchorStyles.Left }, 2, 3);
+            txtErrorDescription = new TextBox { Dock = DockStyle.Fill };
+            formPanel.Controls.Add(txtErrorDescription, 3, 3);
+
+            // Panel chứa các nút chức năng
+            FlowLayoutPanel btnPanel = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft };
+            btnClear = new Button { Text = "Làm mới", Width = 75 };
+            btnDelete = new Button { Text = "Xóa", Width = 65 };
+            btnUpdate = new Button { Text = "Cập nhật", Width = 75 };
+            btnAdd = new Button { Text = "Thêm", Width = 65 };
+
+            btnAdd.Click += BtnAdd_Click;
+            btnUpdate.Click += BtnUpdate_Click;
+            btnDelete.Click += BtnDelete_Click;
+            btnClear.Click += BtnClear_Click;
+
+            btnPanel.Controls.AddRange(new Control[] { btnClear, btnDelete, btnUpdate, btnAdd });
+
+            // Bố cục tổng thể hàng nhập liệu + các nút lệnh phía dưới
+            TableLayoutPanel leftContainer = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2 };
+            leftContainer.RowStyles.Add(new RowStyle(SizeType.Percent, 80f));
+            leftContainer.RowStyles.Add(new RowStyle(SizeType.Percent, 20f));
+            leftContainer.Controls.Add(formPanel, 0, 0);
+            leftContainer.Controls.Add(btnPanel, 0, 1);
+
+            // Khu vực PictureBox hiển thị ảnh thiết bị bên phải
+            TableLayoutPanel rightContainer = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Padding = new Padding(5) };
+            rightContainer.RowStyles.Add(new RowStyle(SizeType.Percent, 80f));
+            rightContainer.RowStyles.Add(new RowStyle(SizeType.Percent, 20f));
+
+            picEquipment = new PictureBox
+            {
+                Dock = DockStyle.Fill,
+                SizeMode = PictureBoxSizeMode.Zoom,
+                BorderStyle = BorderStyle.FixedSingle,
+                BackColor = Color.WhiteSmoke
+            };
+
+            btnBrowseImage = new Button { Text = "Chọn ảnh thiết bị...", Dock = DockStyle.Fill };
+            btnBrowseImage.Click += BtnBrowseImage_Click;
+
+            rightContainer.Controls.Add(picEquipment, 0, 0);
+            rightContainer.Controls.Add(btnBrowseImage, 0, 1);
+
+            inputAndPicLayout.Controls.Add(leftContainer, 0, 0);
+            inputAndPicLayout.Controls.Add(rightContainer, 1, 0);
+
+            grpInputs.Controls.Add(inputAndPicLayout);
+            mainLayout.Controls.Add(grpInputs, 0, 0);
+
+
+            // --- VÙNG 2: TÌM KIẾM VÀ LỌC ---
+            grpControls = new GroupBox { Text = "Tìm kiếm và Lọc dữ liệu", Dock = DockStyle.Fill };
+            FlowLayoutPanel filterPanel = new FlowLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(5) };
+
+            txtSearch = new TextBox { Width = 200, Text = "Mã đơn, Tên KH hoặc SĐT...", ForeColor = Color.Gray };
+            txtSearch.Enter += (s, e) => { if (txtSearch.Text == "Mã đơn, Tên KH hoặc SĐT...") { txtSearch.Text = ""; txtSearch.ForeColor = Color.Black; } };
+            txtSearch.Leave += (s, e) => { if (string.IsNullOrWhiteSpace(txtSearch.Text)) { txtSearch.Text = "Mã đơn, Tên KH hoặc SĐT..."; txtSearch.ForeColor = Color.Gray; } };
+            txtSearch.TextChanged += (s, e) => { if (txtSearch.Text != "Mã đơn, Tên KH atau SĐT...") ApplyFilter(); };
+
+            cmbFilterStatus = new ComboBox { Width = 140, DropDownStyle = ComboBoxStyle.DropDownList };
+            cmbFilterStatus.Items.Add("Tất cả trạng thái");
+            cmbFilterStatus.Items.AddRange(new string[] { "Mới tiếp nhận", "Đang sửa", "Chờ linh kiện", "Hoàn tất", "Đã hủy" });
+            cmbFilterStatus.SelectedIndex = 0;
+            cmbFilterStatus.SelectedIndexChanged += (s, e) => ApplyFilter();
+
+            btnResetFilter = new Button { Text = "Đặt lại lọc", Width = 90 };
+            btnResetFilter.Click += (s, e) => {
+                txtSearch.Text = "Mã đơn, Tên KH hoặc SĐT...";
+                txtSearch.ForeColor = Color.Gray;
+                cmbFilterStatus.SelectedIndex = 0;
+                ApplyFilter();
+            };
+
+            filterPanel.Controls.AddRange(new Control[] { new Label { Text = "Tìm kiếm:", Padding = new Padding(0, 5, 0, 0) }, txtSearch, new Label { Text = "Lọc trạng thái:", Padding = new Padding(0, 5, 0, 0) }, cmbFilterStatus, btnResetFilter });
+            grpControls.Controls.Add(filterPanel);
+            mainLayout.Controls.Add(grpControls, 0, 1);
+
+
+            // --- VÙNG 3: DATAGRIDVIEW ---
+            dgvOrders = new DataGridView();
+            dgvOrders.Dock = DockStyle.Fill;
+            dgvOrders.AutoGenerateColumns = false;
+            dgvOrders.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+            dgvOrders.MultiSelect = false;
+            dgvOrders.ReadOnly = true;
+            dgvOrders.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
+
+            dgvOrders.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = "OrderId", HeaderText = "Mã đơn" });
+            dgvOrders.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = "CustomerName", HeaderText = "Tên khách hàng" });
+            dgvOrders.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = "Phone", HeaderText = "Số điện thoại" });
+            dgvOrders.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = "EquipmentType", HeaderText = "Loại thiết bị" });
+            dgvOrders.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = "ErrorDescription", HeaderText = "Mô tả lỗi" });
+            dgvOrders.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = "ReceiveDate", HeaderText = "Ngày tiếp nhận", DefaultCellStyle = { Format = "dd/MM/yyyy" } });
+
+            // Định dạng chi phí theo "N0" (ngăn cách hàng nghìn)
+            dgvOrders.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = "EstimatedCost", HeaderText = "Chi phí dự kiến", DefaultCellStyle = { Format = "N0" } });
+
+            dgvOrders.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = "Status", HeaderText = "Trạng thái" });
+
+            dgvOrders.CellClick += DgvOrders_CellClick;
+            mainLayout.Controls.Add(dgvOrders, 0, 2);
+        }
+
+        private void LoadInitialData()
+        {
+            masterList.Add(new RepairOrder { OrderId = "HD001", CustomerName = "Phạm Văn Nam", Phone = "0912345678", EquipmentType = "Laptop", ErrorDescription = "Không lên nguồn, hỏng sạc", ReceiveDate = DateTime.Now.AddDays(-2), EstimatedCost = 500000, Status = "Mới tiếp nhận", ImagePath = string.Empty });
+            masterList.Add(new RepairOrder { OrderId = "HD002", CustomerName = "Hoàng Thị Thu", Phone = "0988123456", EquipmentType = "Điện thoại di động", ErrorDescription = "Vỡ màn hình cảm ứng", ReceiveDate = DateTime.Now.AddDays(-5), EstimatedCost = 1200000, Status = "Đang sửa", ImagePath = string.Empty });
+
+            displayList = new BindingList<RepairOrder>(masterList);
+            bindingSource.DataSource = displayList;
+            dgvOrders.DataSource = bindingSource;
+            UpdateStatusStrip();
+        }
+
+        private void BtnBrowseImage_Click(object sender, EventArgs e)
+        {
+            using (OpenFileDialog ofd = new OpenFileDialog())
+            {
+                ofd.Filter = "Image Files (*.jpg;*.jpeg;*.png;*.bmp)|*.jpg;*.jpeg;*.png;*.bmp|All files (*.*)|*.*";
+                if (ofd.ShowDialog() == DialogResult.OK)
+                {
+                    currentImagePath = ofd.FileName;
+                    try
+                    {
+                        picEquipment.Image = Image.FromFile(currentImagePath);
+                    }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show($"Không thể tải ảnh: {ex.Message}", "Lỗi", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
+                }
+            }
+        }
+
+        private bool ValidateInputs(bool isUpdate = false)
+        {
+            bool isValid = true;
+            errorProvider.Clear();
+
+            // 1. Mã đơn
+            if (string.IsNullOrWhiteSpace(txtOrderId.Text))
+            {
+                errorProvider.SetError(txtOrderId, "Mã đơn không được để trống.");
+                isValid = false;
+            }
+            else if (!isUpdate && masterList.Any(x => x.OrderId.Equals(txtOrderId.Text.Trim(), StringComparison.OrdinalIgnoreCase)))
+            {
+                errorProvider.SetError(txtOrderId, "Mã đơn không được trùng.");
+                isValid = false;
+            }
+
+            // 2. Tên khách hàng & SĐT
+            if (string.IsNullOrWhiteSpace(txtCustomerName.Text))
+            {
+                errorProvider.SetError(txtCustomerName, "Tên khách hàng không được để trống.");
+                isValid = false;
+            }
+
+            string phonePattern = @"^0\d{9,10}$";
+            if (string.IsNullOrWhiteSpace(txtPhone.Text) || !Regex.IsMatch(txtPhone.Text.Trim(), phonePattern))
+            {
+                errorProvider.SetError(txtPhone, "Số điện thoại không hợp lệ (Phải bắt đầu bằng 0 và có 10-11 chữ số).");
+                isValid = false;
+            }
+
+            // 3. Loại thiết bị & Trạng thái
+            if (cmbEquipmentType.SelectedIndex == -1)
+            {
+                errorProvider.SetError(cmbEquipmentType, "Vui lòng chọn loại thiết bị.");
+                isValid = false;
+            }
+            if (cmbStatus.SelectedIndex == -1)
+            {
+                errorProvider.SetError(cmbStatus, "Vui lòng chọn trạng thái.");
+                isValid = false;
+            }
+
+            // 4. Mô tả lỗi bắt buộc
+            if (string.IsNullOrWhiteSpace(txtErrorDescription.Text))
+            {
+                errorProvider.SetError(txtErrorDescription, "Mô tả lỗi bắt buộc phải nhập.");
+                isValid = false;
+            }
+
+            // 5. Chi phí dự kiến không âm
+            if (numEstimatedCost.Value < 0)
+            {
+                errorProvider.SetError(numEstimatedCost, "Chi phí dự kiến phải là số không âm.");
+                isValid = false;
+            }
+
+            return isValid;
+        }
+
+        private void BtnAdd_Click(object sender, EventArgs e)
+        {
+            if (!ValidateInputs(false)) return;
+
+            var order = new RepairOrder
+            {
+                OrderId = txtOrderId.Text.Trim(),
+                CustomerName = txtCustomerName.Text.Trim(),
+                Phone = txtPhone.Text.Trim(),
+                EquipmentType = cmbEquipmentType.SelectedItem.ToString(),
+                ErrorDescription = txtErrorDescription.Text.Trim(),
+                ReceiveDate = dtpReceiveDate.Value.Date,
+                EstimatedCost = numEstimatedCost.Value,
+                Status = cmbStatus.SelectedItem.ToString(),
+                ImagePath = currentImagePath
+            };
+
+            masterList.Add(order);
+            ApplyFilter();
+            ClearForm();
+            MessageBox.Show("Thêm đơn sửa chữa thành công!", "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
+        private void BtnUpdate_Click(object sender, EventArgs e)
+        {
+            if (dgvOrders.SelectedRows.Count == 0)
+            {
+                MessageBox.Show("Vui lòng chọn đơn sửa chữa cần cập nhật trên bảng.", "Cảnh báo", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            if (!ValidateInputs(true)) return;
+
+            var selected = (RepairOrder)dgvOrders.SelectedRows[0].DataBoundItem;
+
+            selected.CustomerName = txtCustomerName.Text.Trim();
+            selected.Phone = txtPhone.Text.Trim();
+            selected.EquipmentType = cmbEquipmentType.SelectedItem.ToString();
+            selected.ErrorDescription = txtErrorDescription.Text.Trim();
+            selected.ReceiveDate = dtpReceiveDate.Value.Date;
+            selected.EstimatedCost = numEstimatedCost.Value;
+            selected.Status = cmbStatus.SelectedItem.ToString();
+            selected.ImagePath = currentImagePath;
+
+            bindingSource.ResetBindings(false);
+            ApplyFilter();
+            MessageBox.Show("Cập nhật đơn sửa chữa thành công!", "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
+        private void BtnDelete_Click(object sender, EventArgs e)
+        {
+            if (dgvOrders.SelectedRows.Count == 0)
+            {
+                MessageBox.Show("Vui lòng chọn đơn sửa chữa cần xóa trên bảng.", "Cảnh báo", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            var confirm = MessageBox.Show("Bạn có chắc chắn muốn xóa đơn sửa chữa này?", "Xác nhận xóa", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+            if (confirm == DialogResult.Yes)
+            {
+                var selected = (RepairOrder)dgvOrders.SelectedRows[0].DataBoundItem;
+                masterList.Remove(selected);
+                ApplyFilter();
+                ClearForm();
+                MessageBox.Show("Đã xóa đơn thành công!", "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+        }
+
+        private void BtnClear_Click(object sender, EventArgs e)
+        {
+            ClearForm();
+        }
+
+        private void ClearForm()
+        {
+            txtOrderId.Clear();
+            txtCustomerName.Clear();
+            txtPhone.Clear();
+            txtErrorDescription.Clear();
+            numEstimatedCost.Value = 0;
+            if (cmbEquipmentType.Items.Count > 0) cmbEquipmentType.SelectedIndex = 0;
+            if (cmbStatus.Items.Count > 0) cmbStatus.SelectedIndex = 0;
+            dtpReceiveDate.Value = DateTime.Now;
+            txtOrderId.Enabled = true;
+            currentImagePath = string.Empty;
+            picEquipment.Image = null;
+            errorProvider.Clear();
+            dgvOrders.ClearSelection();
+        }
+
+        private void DgvOrders_CellClick(object sender, DataGridViewCellEventArgs e)
+        {
+            if (e.RowIndex >= 0)
+            {
+                var order = (RepairOrder)dgvOrders.Rows[e.RowIndex].DataBoundItem;
+                txtOrderId.Text = order.OrderId;
+                txtOrderId.Enabled = false; // Khóa mã đơn khi cập nhật
+                txtCustomerName.Text = order.CustomerName;
+                txtPhone.Text = order.Phone;
+                cmbEquipmentType.SelectedItem = order.EquipmentType;
+                txtErrorDescription.Text = order.ErrorDescription;
+                dtpReceiveDate.Value = order.ReceiveDate;
+                numEstimatedCost.Value = order.EstimatedCost;
+                cmbStatus.SelectedItem = order.Status;
+
+                currentImagePath = order.ImagePath;
+                if (!string.IsNullOrEmpty(currentImagePath) && File.Exists(currentImagePath))
+                {
+                    try
+                    {
+                        picEquipment.Image = Image.FromFile(currentImagePath);
+                    }
+                    catch
+                    {
+                        picEquipment.Image = null;
+                    }
+                }
+                else
+                {
+                    picEquipment.Image = null;
+                }
+
+                errorProvider.Clear();
+            }
+        }
+
+        private void ApplyFilter()
+        {
+            string keyword = txtSearch.Text.Trim().ToLower();
+            if (keyword == "mã đơn, tên kh hoặc sđt...") keyword = "";
+
+            string statusFilter = cmbFilterStatus.SelectedIndex > 0 ? cmbFilterStatus.SelectedItem.ToString() : "Tất cả";
+
+            var filtered = masterList.Where(x =>
+                (string.IsNullOrEmpty(keyword) || x.OrderId.ToLower().Contains(keyword) || x.CustomerName.ToLower().Contains(keyword) || x.Phone.Contains(keyword)) &&
+                (statusFilter == "Tất cả" || x.Status == statusFilter)
+            ).ToList();
+
+            displayList = new BindingList<RepairOrder>(filtered);
+            bindingSource.DataSource = displayList;
+            UpdateStatusStrip();
+        }
+
+        private void UpdateStatusStrip()
+        {
+            int totalCount = bindingSource.Count;
+
+            // Tính tổng chi phí dự kiến của các đơn CHƯA HOÀN TẤT (Trạng thái khác "Hoàn tất" và "Đã hủy")
+            decimal totalCostUnfinished = displayList
+                .Where(x => x.Status != "Hoàn tất" && x.Status != "Đã hủy")
+                .Sum(x => x.EstimatedCost);
+
+            lblCountInfo.Text = $"Số đơn hiển thị: {totalCount}  |  ";
+            lblTotalCostInfo.Text = $"Tổng chi phí dự kiến (chưa hoàn tất): {totalCostUnfinished:N0} ₫";
+        }
+
+        private void MenuExport_Click(object sender, EventArgs e)
+        {
+            using (SaveFileDialog sfd = new SaveFileDialog())
+            {
+                sfd.Filter = "CSV files (*.csv)|*.csv|All files (*.*)|*.*";
+                sfd.FileName = $"DonSuaChua_{DateTime.Now:yyyyMMdd_HHmmss}.csv";
+
+                if (sfd.ShowDialog() == DialogResult.OK)
+                {
+                    try
+                    {
+                        using (StreamWriter sw = new StreamWriter(sfd.FileName, false, System.Text.Encoding.UTF8))
+                        {
+                            sw.WriteLine("MaDon,TenKhachHang,SoDienThoai,LoaiThietBi,MoTaLoi,NgayTiepNhan,ChiPhiDuKien,TrangThai");
+
+                            foreach (var item in displayList)
+                            {
+                                sw.WriteLine($"\"{item.OrderId}\",\"{item.CustomerName}\",\"{item.Phone}\",\"{item.EquipmentType}\",\"{item.ErrorDescription}\",\"{item.ReceiveDate:dd/MM/yyyy}\",{item.EstimatedCost},\"{item.Status}\"");
+                            }
+                        }
+                        MessageBox.Show("Xuất danh sách ra file CSV thành công!", "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show($"Lỗi khi xuất file: {ex.Message}", "Lỗi", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
+                }
+            }
+        }
+    }
+
+    // Điểm khởi chạy ứng dụng
+    static class Program
+    {
+        [STAThread]
+        static void Main()
+        {
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+            Application.Run(new MainForm());
+        }
+    }
+}
