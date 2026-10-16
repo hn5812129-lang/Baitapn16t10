@@ -1,0 +1,509 @@
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.IO;
+using System.Linq;
+using System.Windows.Forms;
+
+namespace LabEquipmentCheckout
+{
+    // Lớp dữ liệu Phiếu mượn thiết bị
+    public class CheckoutRecord
+    {
+        public string TicketId { get; set; }        // Mã phiếu (Duy nhất)
+        public string StudentId { get; set; }       // Mã sinh viên
+        public string StudentName { get; set; }     // Họ tên sinh viên
+        public string EquipmentName { get; set; }   // Tên thiết bị
+        public int Quantity { get; set; }           // Số lượng
+        public DateTime CheckoutDate { get; set; }  // Ngày mượn
+        public DateTime DueDate { get; set; }       // Hạn trả
+        public DateTime? ReturnDate { get; set; }   // Ngày trả thực tế (nullable)
+
+        // Trạng thái tự động tính toán dựa trên điều kiện thực tế
+        public string Status
+        {
+            get
+            {
+                if (ReturnDate.HasValue) return "Đã trả";
+                if (DueDate.Date < DateTime.Now.Date) return "Quá hạn";
+                return "Đang mượn";
+            }
+        }
+    }
+
+    public partial class MainForm : Form
+    {
+        private List<CheckoutRecord> masterList = new List<CheckoutRecord>();
+        private BindingList<CheckoutRecord> displayList;
+        private BindingSource bindingSource = new BindingSource();
+
+        // Các Controls trên giao diện
+        private TableLayoutPanel mainLayout;
+        private GroupBox grpInputs, grpControls;
+        private TextBox txtTicketId, txtStudentId, txtStudentName, txtSearch;
+        private NumericUpDown numQuantity;
+        private ComboBox cmbEquipment, cmbFilterStatus;
+        private DateTimePicker dtpCheckoutDate, dtpDueDate, dtpReturnDate, dtpFilterDate;
+        private CheckBox chkFilterDate, chkIsReturned;
+        private DataGridView dgvCheckout;
+        private Button btnAdd, btnUpdate, btnDelete, btnClear, btnResetFilter;
+        private StatusStrip statusStrip;
+        private ToolStripStatusLabel lblTotalCount, lblOverdueCount;
+        private ErrorProvider errorProvider;
+        private MenuStrip menuStrip;
+
+        public MainForm()
+        {
+            InitializeComponentCustom();
+            LoadInitialData();
+        }
+
+        private void InitializeComponentCustom()
+        {
+            this.Text = "Lab Equipment Checkout - Quản lý mượn trả thiết bị phòng thực hành";
+            this.Size = new System.Drawing.Size(1050, 750);
+            this.StartPosition = FormStartPosition.CenterScreen;
+
+            errorProvider = new ErrorProvider();
+
+            // 1. MenuStrip (Xuất CSV)
+            menuStrip = new MenuStrip();
+            ToolStripMenuItem menuFile = new ToolStripMenuItem("Tệp");
+            ToolStripMenuItem menuExport = new ToolStripMenuItem("Xuất danh sách đang lọc ra CSV...");
+            menuExport.Click += MenuExport_Click;
+            menuFile.DropDownItems.Add(menuExport);
+            menuStrip.Items.Add(menuFile);
+            this.MainMenuStrip = menuStrip;
+            this.Controls.Add(menuStrip);
+
+            // 2. StatusStrip (Hiển thị tổng số phiếu và số phiếu quá hạn)
+            statusStrip = new StatusStrip();
+            lblTotalCount = new ToolStripStatusLabel("Tổng số phiếu: 0  |  ");
+            lblOverdueCount = new ToolStripStatusLabel("Số phiếu quá hạn: 0");
+            statusStrip.Items.AddRange(new ToolStripItem[] { lblTotalCount, lblOverdueCount });
+            this.Controls.Add(statusStrip);
+
+            // 3. Main TableLayoutPanel
+            mainLayout = new TableLayoutPanel();
+            mainLayout.Dock = DockStyle.Fill;
+            mainLayout.ColumnCount = 1;
+            mainLayout.RowCount = 3;
+            mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 240f)); // Vùng nhập liệu
+            mainLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 65f));  // Vùng tìm kiếm & lọc
+            mainLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f)); // DataGridView
+            this.Controls.Add(mainLayout);
+            mainLayout.BringToFront();
+
+            // --- VÙNG 1: NHẬP LIỆU ---
+            grpInputs = new GroupBox { Text = "Thông tin chi tiết phiếu mượn", Dock = DockStyle.Fill };
+            TableLayoutPanel inputPanel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 4, RowCount = 4, Padding = new Padding(5) };
+
+            inputPanel.Controls.Add(new Label { Text = "Mã phiếu:", Anchor = AnchorStyles.Left }, 0, 0);
+            txtTicketId = new TextBox { Dock = DockStyle.Fill };
+            inputPanel.Controls.Add(txtTicketId, 1, 0);
+
+            inputPanel.Controls.Add(new Label { Text = "Mã sinh viên:", Anchor = AnchorStyles.Left }, 2, 0);
+            txtStudentId = new TextBox { Dock = DockStyle.Fill };
+            inputPanel.Controls.Add(txtStudentId, 3, 0);
+
+            inputPanel.Controls.Add(new Label { Text = "Họ tên sinh viên:", Anchor = AnchorStyles.Left }, 0, 1);
+            txtStudentName = new TextBox { Dock = DockStyle.Fill };
+            inputPanel.Controls.Add(txtStudentName, 1, 1);
+
+            inputPanel.Controls.Add(new Label { Text = "Thiết bị:", Anchor = AnchorStyles.Left }, 2, 1);
+            cmbEquipment = new ComboBox { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList };
+            cmbEquipment.Items.AddRange(new string[] { "Máy hiện sóng (Oscilloscope)", "Bộ nguồn DC", "Máy phát hàm (Function Generator)", "Đồng hồ vạn năng số (DMM)", "Bộ hàn linh kiện SMD" });
+            inputPanel.Controls.Add(cmbEquipment, 3, 1);
+
+            inputPanel.Controls.Add(new Label { Text = "Số lượng:", Anchor = AnchorStyles.Left }, 0, 2);
+            numQuantity = new NumericUpDown { Minimum = 1, Maximum = 100, Value = 1, Dock = DockStyle.Fill };
+            inputPanel.Controls.Add(numQuantity, 1, 2);
+
+            inputPanel.Controls.Add(new Label { Text = "Ngày mượn:", Anchor = AnchorStyles.Left }, 2, 2);
+            dtpCheckoutDate = new DateTimePicker { Format = DateTimePickerFormat.Short, Dock = DockStyle.Fill };
+            inputPanel.Controls.Add(dtpCheckoutDate, 3, 2);
+
+            inputPanel.Controls.Add(new Label { Text = "Hạn trả:", Anchor = AnchorStyles.Left }, 0, 3);
+            dtpDueDate = new DateTimePicker { Format = DateTimePickerFormat.Short, Dock = DockStyle.Fill };
+            inputPanel.Controls.Add(dtpDueDate, 1, 3);
+
+            // Panel nhỏ chứa Ngày trả thực tế & Checkbox đã trả + Các nút thao tác
+            FlowLayoutPanel returnActionPanel = new FlowLayoutPanel { Dock = DockStyle.Fill };
+            chkIsReturned = new CheckBox { Text = "Đã trả:", AutoSize = true, Padding = new Padding(0, 5, 0, 0) };
+            dtpReturnDate = new DateTimePicker { Format = DateTimePickerFormat.Short, Width = 105, Enabled = false };
+            chkIsReturned.CheckedChanged += (s, e) => {
+                dtpReturnDate.Enabled = chkIsReturned.Checked;
+                if (!chkIsReturned.Checked) dtpReturnDate.Value = DateTime.Now;
+            };
+
+            FlowLayoutPanel btnPanel = new FlowLayoutPanel { FlowDirection = FlowDirection.RightToLeft, Dock = DockStyle.Fill };
+            btnClear = new Button { Text = "Làm mới", Width = 75 };
+            btnDelete = new Button { Text = "Xóa", Width = 65 };
+            btnUpdate = new Button { Text = "Cập nhật", Width = 75 };
+            btnAdd = new Button { Text = "Thêm", Width = 65 };
+
+            btnAdd.Click += BtnAdd_Click;
+            btnUpdate.Click += BtnUpdate_Click;
+            btnDelete.Click += BtnDelete_Click;
+            btnClear.Click += BtnClear_Click;
+
+            btnPanel.Controls.AddRange(new Control[] { btnClear, btnDelete, btnUpdate, btnAdd });
+
+            // Bố trí hàng 3
+            FlowLayoutPanel row3Panel = new FlowLayoutPanel { Dock = DockStyle.Fill };
+            row3Panel.Controls.Add(new Label { Text = "Hạn trả:", Width = 70, Padding = new Padding(0, 5, 0, 0) });
+            // Đưa inputPanel cấu hình lại hàng 3
+            inputPanel.Controls.Add(new Label { Text = "Đã trả / Ngày trả:", Anchor = AnchorStyles.Left }, 2, 3);
+
+            FlowLayoutPanel retPanel = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight };
+            retPanel.Controls.Add(chkIsReturned);
+            retPanel.Controls.Add(dtpReturnDate);
+            inputPanel.Controls.Add(retPanel, 3, 3);
+
+            // Đặt các nút ở góc dưới cùng Form thông qua một TableLayout riêng hoặc bố trí hợp lý
+            // Để gọn gàng, ta tạo thêm một hàng hành động nút riêng hoặc đặt ở góc phải. Ở đây ta bổ sung khu vực nút bấm vào phía dưới hoặc chung layout.
+            // Để đơn giản và chuẩn giao diện, ta đưa cụm nút vào một panel riêng biệt dưới TableLayoutPanel hoặc đặt cạnh các control.
+
+            grpInputs.Controls.Add(inputPanel);
+            mainLayout.Controls.Add(grpInputs, 0, 0);
+
+            // Thanh chứa nút lệnh riêng biệt dưới cụm nhập liệu cho thoáng
+            FlowLayoutPanel actionCommandPanel = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft, Padding = new Padding(0, 0, 10, 0) };
+            actionCommandPanel.Controls.AddRange(new Control[] { btnClear, btnDelete, btnUpdate, btnAdd });
+
+            // Cập nhật lại row 0 của mainLayout thành Panel chứa cả inputPanel và actionCommandPanel
+            TableLayoutPanel topContainer = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2 };
+            topContainer.RowStyles.Add(new RowStyle(SizeType.Percent, 80f));
+            topContainer.RowStyles.Add(new RowStyle(SizeType.Percent, 20f));
+            topContainer.Controls.Add(inputPanel, 0, 0);
+            topContainer.Controls.Add(actionCommandPanel, 0, 1);
+            grpInputs.Controls.Clear();
+            grpInputs.Controls.Add(topContainer);
+
+
+            // --- VÙNG 2: TÌM KIẾM VÀ LỌC ---
+            grpControls = new GroupBox { Text = "Tìm kiếm và Lọc dữ liệu", Dock = DockStyle.Fill };
+            FlowLayoutPanel filterPanel = new FlowLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(5) };
+
+            txtSearch = new TextBox { Width = 170, Text = "Mã SV hoặc Tên thiết bị...", ForeColor = System.Drawing.Color.Gray };
+            txtSearch.Enter += (s, e) => { if (txtSearch.Text == "Mã SV hoặc Tên thiết bị...") { txtSearch.Text = ""; txtSearch.ForeColor = System.Drawing.Color.Black; } };
+            txtSearch.Leave += (s, e) => { if (string.IsNullOrWhiteSpace(txtSearch.Text)) { txtSearch.Text = "Mã SV hoặc Tên thiết bị..."; txtSearch.ForeColor = System.Drawing.Color.Gray; } };
+            txtSearch.TextChanged += (s, e) => { if (txtSearch.Text != "Mã SV hoặc Tên thiết bị...") ApplyFilter(); };
+
+            cmbFilterStatus = new ComboBox { Width = 130, DropDownStyle = ComboBoxStyle.DropDownList };
+            cmbFilterStatus.Items.Add("Tất cả trạng thái");
+            cmbFilterStatus.Items.AddRange(new string[] { "Đang mượn", "Quá hạn", "Đã trả" });
+            cmbFilterStatus.SelectedIndex = 0;
+            cmbFilterStatus.SelectedIndexChanged += (s, e) => ApplyFilter();
+
+            chkFilterDate = new CheckBox { Text = "Lọc ngày mượn:", AutoSize = true, Padding = new Padding(0, 5, 0, 0) };
+            chkFilterDate.CheckedChanged += (s, e) => ApplyFilter();
+
+            dtpFilterDate = new DateTimePicker { Format = DateTimePickerFormat.Short, Width = 110 };
+            dtpFilterDate.ValueChanged += (s, e) => { if (chkFilterDate.Checked) ApplyFilter(); };
+
+            btnResetFilter = new Button { Text = "Đặt lại lọc", Width = 90 };
+            btnResetFilter.Click += (s, e) => {
+                txtSearch.Text = "Mã SV hoặc Tên thiết bị...";
+                txtSearch.ForeColor = System.Drawing.Color.Gray;
+                cmbFilterStatus.SelectedIndex = 0;
+                chkFilterDate.Checked = false;
+                ApplyFilter();
+            };
+
+            filterPanel.Controls.AddRange(new Control[] { new Label { Text = "Tìm kiếm:", Padding = new Padding(0, 5, 0, 0) }, txtSearch, new Label { Text = "Trạng thái:", Padding = new Padding(0, 5, 0, 0) }, cmbFilterStatus, chkFilterDate, dtpFilterDate, btnResetFilter });
+            grpControls.Controls.Add(filterPanel);
+            mainLayout.Controls.Add(grpControls, 0, 1);
+
+
+            // --- VÙNG 3: DATAGRIDVIEW ---
+            dgvCheckout = new DataGridView();
+            dgvCheckout.Dock = DockStyle.Fill;
+            dgvCheckout.AutoGenerateColumns = false;
+            dgvCheckout.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+            dgvCheckout.MultiSelect = false;
+            dgvCheckout.ReadOnly = true;
+            dgvCheckout.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
+
+            dgvCheckout.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = "TicketId", HeaderText = "Mã phiếu" });
+            dgvCheckout.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = "StudentId", HeaderText = "Mã SV" });
+            dgvCheckout.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = "StudentName", HeaderText = "Họ tên sinh viên" });
+            dgvCheckout.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = "EquipmentName", HeaderText = "Thiết bị" });
+            dgvCheckout.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = "Quantity", HeaderText = "SL" });
+            dgvCheckout.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = "CheckoutDate", HeaderText = "Ngày mượn", DefaultCellStyle = { Format = "dd/MM/yyyy" } });
+            dgvCheckout.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = "DueDate", HeaderText = "Hạn trả", DefaultCellStyle = { Format = "dd/MM/yyyy" } });
+
+            // Cột ngày trả thực tế (hiển thị trống nếu chưa trả)
+            DataGridViewTextBoxColumn returnCol = new DataGridViewTextBoxColumn { DataPropertyName = "ReturnDate", HeaderText = "Ngày trả", DefaultCellStyle = { Format = "dd/MM/yyyy" } };
+            dgvCheckout.Columns.Add(returnCol);
+
+            dgvCheckout.Columns.Add(new DataGridViewTextBoxColumn { DataPropertyName = "Status", HeaderText = "Trạng thái" });
+
+            dgvCheckout.CellClick += DgvCheckout_CellClick;
+            mainLayout.Controls.Add(dgvCheckout, 0, 2);
+        }
+
+        private void LoadInitialData()
+        {
+            masterList.Add(new CheckoutRecord { TicketId = "PM001", StudentId = "SV101", StudentName = "Nguyễn Văn Hùng", EquipmentName = "Máy hiện sóng (Oscilloscope)", Quantity = 1, CheckoutDate = DateTime.Now.AddDays(-5), DueDate = DateTime.Now.AddDays(-1), ReturnDate = null });
+            masterList.Add(new CheckoutRecord { TicketId = "PM002", StudentId = "SV102", StudentName = "Lê Thị Mai", EquipmentName = "Bộ nguồn DC", Quantity = 2, CheckoutDate = DateTime.Now.AddDays(-2), DueDate = DateTime.Now.AddDays(3), ReturnDate = null });
+            masterList.Add(new CheckoutRecord { TicketId = "PM003", StudentId = "SV103", StudentName = "Trần Minh Quân", EquipmentName = "Đồng hồ vạn năng số (DMM)", Quantity = 1, CheckoutDate = DateTime.Now.AddDays(-10), DueDate = DateTime.Now.AddDays(-5), ReturnDate = DateTime.Now.AddDays(-6) });
+
+            displayList = new BindingList<CheckoutRecord>(masterList);
+            bindingSource.DataSource = displayList;
+            dgvCheckout.DataSource = bindingSource;
+            UpdateStatusStrip();
+        }
+
+        private bool ValidateInputs(bool isUpdate = false)
+        {
+            bool isValid = true;
+            errorProvider.Clear();
+
+            // 1. Mã phiếu
+            if (string.IsNullOrWhiteSpace(txtTicketId.Text))
+            {
+                errorProvider.SetError(txtTicketId, "Mã phiếu không được để trống.");
+                isValid = false;
+            }
+            else if (!isUpdate && masterList.Any(x => x.TicketId.Equals(txtTicketId.Text.Trim(), StringComparison.OrdinalIgnoreCase)))
+            {
+                errorProvider.SetError(txtTicketId, "Mã phiếu không được trùng.");
+                isValid = false;
+            }
+
+            // 2. Mã sinh viên & Họ tên
+            if (string.IsNullOrWhiteSpace(txtStudentId.Text))
+            {
+                errorProvider.SetError(txtStudentId, "Mã sinh viên không được để trống.");
+                isValid = false;
+            }
+            if (string.IsNullOrWhiteSpace(txtStudentName.Text))
+            {
+                errorProvider.SetError(txtStudentName, "Họ tên sinh viên không được để trống.");
+                isValid = false;
+            }
+
+            // 3. Thiết bị
+            if (cmbEquipment.SelectedIndex == -1)
+            {
+                errorProvider.SetError(cmbEquipment, "Vui lòng chọn thiết bị.");
+                isValid = false;
+            }
+
+            // 4. Số lượng > 0
+            if (numQuantity.Value <= 0)
+            {
+                errorProvider.SetError(numQuantity, "Số lượng phải lớn hơn 0.");
+                isValid = false;
+            }
+
+            // 5. Hạn trả không trước ngày mượn
+            if (dtpDueDate.Value.Date < dtpCheckoutDate.Value.Date)
+            {
+                errorProvider.SetError(dtpDueDate, "Hạn trả không được trước ngày mượn.");
+                isValid = false;
+            }
+
+            // 6. Ngày trả thực tế không trước ngày mượn (nếu chọn đã trả)
+            if (chkIsReturned.Checked && dtpReturnDate.Value.Date < dtpCheckoutDate.Value.Date)
+            {
+                errorProvider.SetError(dtpReturnDate, "Ngày trả thực tế không được trước ngày mượn.");
+                isValid = false;
+            }
+
+            return isValid;
+        }
+
+        private void BtnAdd_Click(object sender, EventArgs e)
+        {
+            if (!ValidateInputs(false)) return;
+
+            var record = new CheckoutRecord
+            {
+                TicketId = txtTicketId.Text.Trim(),
+                StudentId = txtStudentId.Text.Trim(),
+                StudentName = txtStudentName.Text.Trim(),
+                EquipmentName = cmbEquipment.SelectedItem.ToString(),
+                Quantity = (int)numQuantity.Value,
+                CheckoutDate = dtpCheckoutDate.Value.Date,
+                DueDate = dtpDueDate.Value.Date,
+                ReturnDate = chkIsReturned.Checked ? (DateTime?)dtpReturnDate.Value.Date : null
+            };
+
+            masterList.Add(record);
+            ApplyFilter();
+            ClearForm();
+            MessageBox.Show("Thêm phiếu mượn thành công!", "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
+        private void BtnUpdate_Click(object sender, EventArgs e)
+        {
+            if (dgvCheckout.SelectedRows.Count == 0)
+            {
+                MessageBox.Show("Vui lòng chọn phiếu mượn cần cập nhật trên bảng.", "Cảnh báo", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            if (!ValidateInputs(true)) return;
+
+            var selected = (CheckoutRecord)dgvCheckout.SelectedRows[0].DataBoundItem;
+
+            selected.StudentId = txtStudentId.Text.Trim();
+            selected.StudentName = txtStudentName.Text.Trim();
+            selected.EquipmentName = cmbEquipment.SelectedItem.ToString();
+            selected.Quantity = (int)numQuantity.Value;
+            selected.CheckoutDate = dtpCheckoutDate.Value.Date;
+            selected.DueDate = dtpDueDate.Value.Date;
+            selected.ReturnDate = chkIsReturned.Checked ? (DateTime?)dtpReturnDate.Value.Date : null;
+
+            bindingSource.ResetBindings(false);
+            ApplyFilter();
+            MessageBox.Show("Cập nhật phiếu mượn thành công!", "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
+        private void BtnDelete_Click(object sender, EventArgs e)
+        {
+            if (dgvCheckout.SelectedRows.Count == 0)
+            {
+                MessageBox.Show("Vui lòng chọn phiếu mượn cần xóa trên bảng.", "Cảnh báo", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            var confirm = MessageBox.Show("Bạn có chắc chắn muốn xóa phiếu mượn này?", "Xác nhận xóa", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+            if (confirm == DialogResult.Yes)
+            {
+                var selected = (CheckoutRecord)dgvCheckout.SelectedRows[0].DataBoundItem;
+                masterList.Remove(selected);
+                ApplyFilter();
+                ClearForm();
+                MessageBox.Show("Đã xóa phiếu mượn thành công!", "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+        }
+
+        private void BtnClear_Click(object sender, EventArgs e)
+        {
+            ClearForm();
+        }
+
+        private void ClearForm()
+        {
+            txtTicketId.Clear();
+            txtStudentId.Clear();
+            txtStudentName.Clear();
+            numQuantity.Value = 1;
+            if (cmbEquipment.Items.Count > 0) cmbEquipment.SelectedIndex = 0;
+            dtpCheckoutDate.Value = DateTime.Now;
+            dtpDueDate.Value = DateTime.Now.AddDays(7);
+            chkIsReturned.Checked = false;
+            dtpReturnDate.Value = DateTime.Now;
+            dtpReturnDate.Enabled = false;
+            txtTicketId.Enabled = true;
+            errorProvider.Clear();
+            dgvCheckout.ClearSelection();
+        }
+
+        private void DgvCheckout_CellClick(object sender, DataGridViewCellEventArgs e)
+        {
+            if (e.RowIndex >= 0)
+            {
+                var record = (CheckoutRecord)dgvCheckout.Rows[e.RowIndex].DataBoundItem;
+                txtTicketId.Text = record.TicketId;
+                txtTicketId.Enabled = false; // Khóa mã phiếu khi cập nhật
+                txtStudentId.Text = record.StudentId;
+                txtStudentName.Text = record.StudentName;
+                cmbEquipment.SelectedItem = record.EquipmentName;
+                numQuantity.Value = record.Quantity;
+                dtpCheckoutDate.Value = record.CheckoutDate;
+                dtpDueDate.Value = record.DueDate;
+
+                if (record.ReturnDate.HasValue)
+                {
+                    chkIsReturned.Checked = true;
+                    dtpReturnDate.Enabled = true;
+                    dtpReturnDate.Value = record.ReturnDate.Value;
+                }
+                else
+                {
+                    chkIsReturned.Checked = false;
+                    dtpReturnDate.Enabled = false;
+                    dtpReturnDate.Value = DateTime.Now;
+                }
+
+                errorProvider.Clear();
+            }
+        }
+
+        private void ApplyFilter()
+        {
+            string keyword = txtSearch.Text.Trim().ToLower();
+            if (keyword == "mã sv hoặc tên thiết bị...") keyword = "";
+
+            string statusFilter = cmbFilterStatus.SelectedIndex > 0 ? cmbFilterStatus.SelectedItem.ToString() : "Tất cả";
+            bool dateFilterEnabled = chkFilterDate.Checked;
+            DateTime filterDate = dtpFilterDate.Value.Date;
+
+            var filtered = masterList.Where(x =>
+                (string.IsNullOrEmpty(keyword) || x.StudentId.ToLower().Contains(keyword) || x.EquipmentName.ToLower().Contains(keyword)) &&
+                (statusFilter == "Tất cả trạng thái" || x.Status == statusFilter) &&
+                (!dateFilterEnabled || x.CheckoutDate.Date == filterDate)
+            ).ToList();
+
+            displayList = new BindingList<CheckoutRecord>(filtered);
+            bindingSource.DataSource = displayList;
+            UpdateStatusStrip();
+        }
+
+        private void UpdateStatusStrip()
+        {
+            int total = bindingSource.Count;
+            // Đếm số phiếu quá hạn trong danh sách đang hiển thị
+            int overdue = displayList.Count(x => x.Status == "Quá hạn");
+            lblTotalCount.Text = $"Tổng số phiếu: {total}  |  ";
+            lblOverdueCount.Text = $"Số phiếu quá hạn: {overdue}";
+        }
+
+        private void MenuExport_Click(object sender, EventArgs e)
+        {
+            using (SaveFileDialog sfd = new SaveFileDialog())
+            {
+                sfd.Filter = "CSV files (*.csv)|*.csv|All files (*.*)|*.*";
+                sfd.FileName = $"PhieuMuonThietBi_{DateTime.Now:yyyyMMdd_HHmmss}.csv";
+
+                if (sfd.ShowDialog() == DialogResult.OK)
+                {
+                    try
+                    {
+                        using (StreamWriter sw = new StreamWriter(sfd.FileName, false, System.Text.Encoding.UTF8))
+                        {
+                            sw.WriteLine("MaPhiếu,MaSV,HoTenSinhVien,ThietBi,SoLuong,NgayMuon,HanTra,NgayTraThucTe,TrangThai");
+
+                            foreach (var item in displayList)
+                            {
+                                string retDateStr = item.ReturnDate.HasValue ? item.ReturnDate.Value.ToString("dd/MM/yyyy") : "";
+                                sw.WriteLine($"\"{item.TicketId}\",\"{item.StudentId}\",\"{item.StudentName}\",\"{item.EquipmentName}\",{item.Quantity},\"{item.CheckoutDate:dd/MM/yyyy}\",\"{item.DueDate:dd/MM/yyyy}\",\"{retDateStr}\",\"{item.Status}\"");
+                            }
+                        }
+                        MessageBox.Show("Xuất danh sách đang lọc ra file CSV thành công!", "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show($"Lỗi khi xuất file: {ex.Message}", "Lỗi", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
+                }
+            }
+        }
+    }
+
+    // Điểm khởi chạy ứng dụng
+    static class Program
+    {
+        [STAThread]
+        static void Main()
+        {
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+            Application.Run(new MainForm());
+        }
+    }
+}
